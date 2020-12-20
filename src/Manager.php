@@ -9,7 +9,6 @@ use Illuminate\Filesystem\Filesystem;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Foundation\Application;
 use Barryvdh\TranslationManager\Models\Translation;
-use Barryvdh\TranslationManager\Models\TranslationNamespace;
 use Barryvdh\TranslationManager\Events\TranslationsExportedEvent;
 
 class Manager
@@ -52,60 +51,40 @@ class Manager
         return ($result && is_array($result)) ? $result : [];
     }
 
-    public function importTranslations($replace = false)
+    public function importTranslations($replace = false, $base = null, $import_group = false)
     {
         $counter = 0;
-
-        // Main app and vendor translations
-        $counter += $this->importArrayTranslations($replace);
-
-        // other registered namespaces
-        $namespaces = \Lang::getLoader()->namespaces();
-        foreach ($namespaces as $namespace => $dir) {
-            $counter += $this->importArrayTranslations($replace, $dir, $namespace);
-        }
-
-        // Json translations
-        $counter += $this->importJsonTranslations($replace);
-
-        return $counter;
-    }
-
-    /**
-     * Import array translations
-     *
-     * @return int
-     */
-    public function importArrayTranslations($replace = false, $base = null, $namespace = null)
-    {
-        $counter = 0;
-
-        if (!$base) {
+        //allows for vendor lang files to be properly recorded through recursion.
+        $vendor = true;
+        if ($base == null) {
             $base = $this->app['path.lang'];
             $vendor = false;
-        } else {
-            $vendor = $namespace === null;
         }
 
         foreach ($this->files->directories($base) as $langPath) {
             $locale = basename($langPath);
 
-            // import langfiles for each vendor
+            //import langfiles for each vendor
             if ($locale == 'vendor') {
                 foreach ($this->files->directories($langPath) as $vendor) {
-                    $counter += $this->importArrayTranslations($replace, $vendor);
+                    $counter += $this->importTranslations($replace, $vendor);
                 }
+
                 continue;
             }
-
+            $vendorName = $this->files->name($this->files->dirname($langPath));
             foreach ($this->files->allfiles($langPath) as $file) {
                 $info = pathinfo($file);
                 $group = $info['filename'];
+                if ($import_group) {
+                    if ($import_group !== $group) {
+                        continue;
+                    }
+                }
 
                 if (in_array($group, $this->config['exclude_groups'])) {
                     continue;
                 }
-
                 $subLangPath = str_replace($langPath.DIRECTORY_SEPARATOR, '', $info['dirname']);
                 $subLangPath = str_replace(DIRECTORY_SEPARATOR, '/', $subLangPath);
                 $langPath = str_replace(DIRECTORY_SEPARATOR, '/', $langPath);
@@ -114,15 +93,11 @@ class Manager
                     $group = $subLangPath.'/'.$group;
                 }
 
-                if (!$vendor) {
-                    $translations = \Lang::getLoader()->load($locale, $group, $namespace);
-                    if ($namespace) {
-                        $group = $namespace .'::'. $group;
-                    }
+                if (! $vendor) {
+                    $translations = \Lang::getLoader()->load($locale, $group);
                 } else {
                     $translations = include $file;
-                    $vendorName = $this->files->name($this->files->dirname($langPath));
-                    $group = 'vendor/'. $vendorName .'/'. $group;
+                    $group = 'vendor/'.$vendorName;
                 }
 
                 if ($translations && is_array($translations)) {
@@ -130,28 +105,9 @@ class Manager
                         $importedTranslation = $this->importTranslation($key, $value, $locale, $group, $replace);
                         $counter += $importedTranslation ? 1 : 0;
                     }
-
-                    if ($namespace) {
-                        TranslationNamespace::updateOrCreate(
-                            ['namespace' => $namespace],
-                            ['path' => $base]
-                        );
-                    }
                 }
             }
         }
-
-        return $counter;
-    }
-
-    /**
-     * Import Json translations
-     *
-     * @return int
-     */
-    public function importJsonTranslations($replace = false)
-    {
-        $counter = 0;
 
         foreach ($this->files->files($this->app['path.lang']) as $jsonTranslationFile) {
             if (strpos($jsonTranslationFile, '.json') === false) {
@@ -312,24 +268,17 @@ class Manager
                 $tree = $this->makeTree(Translation::ofTranslatedGroup($group)
                                                     ->orderByGroupKeys(Arr::get($this->config, 'sort_keys', false))
                                                     ->get());
-                $namespaces = TranslationNamespace::all()->pluck('path', 'namespace');
 
-                $group_name = $group;
                 foreach ($tree as $locale => $groups) {
-                    if (isset($groups[$group_name])) {
-                        $translations = $groups[$group_name];
+                    if (isset($groups[$group])) {
+                        $translations = $groups[$group];
                         $path = $this->app['path.lang'];
 
-                        if (Str::contains($group, '::')) {
-                            list($namespace, $group) = explode('::', $group, 2);
-                            $path = $namespaces[$namespace] ?? $this->app['path.lang'];
-                        }
-
-                        if ($vendor) {
-                            list($package, $group) = explode('/', Str::after($group, 'vendor/'), 2);
-                            $path = $basePath . DIRECTORY_SEPARATOR .'vendor'. DIRECTORY_SEPARATOR . $package;
-                        }
                         $locale_path = $locale.DIRECTORY_SEPARATOR.$group;
+                        if ($vendor) {
+                            $path = $basePath.'/'.$group.'/'.$locale;
+                            $locale_path = Str::after($group, '/');
+                        }
                         $subfolders = explode(DIRECTORY_SEPARATOR, $locale_path);
                         array_pop($subfolders);
 
@@ -422,7 +371,6 @@ class Manager
     public function truncateTranslations()
     {
         Translation::truncate();
-        TranslationNamespace::truncate();
     }
 
     public function getLocales()
